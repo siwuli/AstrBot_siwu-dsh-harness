@@ -42,6 +42,7 @@ HELP_TEXT = """DSH 远程操作（白名单用户，私聊）：
 · dsh <内容> — 交给 DeepSeek Harness 执行，返回非思考输出
 · dsh 工作区 — 列出工作区；dsh 工作区 <编号|路径> 切换（新建会话）
 · dsh 模型 — 列出模型（全局编号）；dsh 模型 <编号> 或 dsh 模型 <provider> <model> 切换
+· dsh 会话 — 列出历史会话；dsh 会话 <编号> 切换继续对话
 · dsh 新会话 / 状态 / 历史 / 停止 / 帮助
 · DSH 提问时：dsh <答案>；请求授权时：dsh 同意 / dsh 拒绝"""
 
@@ -51,6 +52,7 @@ HISTORY_WORDS = {"历史", "history", "log"}
 STOP_WORDS = {"停止", "stop", "cancel"}
 WORKSPACE_WORDS = {"工作区", "workspace", "ws"}
 MODEL_WORDS = {"模型", "model"}
+SESSION_WORDS = {"会话", "sessions", "session"}
 HELP_WORDS = {"帮助", "help", "h", "?"}
 ALLOW_WORDS = {"同意", "允许", "批准", "确认", "可以", "yes", "y", "ok", "on"}
 
@@ -153,6 +155,20 @@ class DshHarnessPlugin(star.Star):
         items = data.get("items") or []
         self._ws_cache = {"ts": now, "items": items}
         return items
+
+    @staticmethod
+    def _relative_time(ts: Optional[float]) -> str:
+        """毫秒时间戳 → 人类可读相对时间。"""
+        if not ts:
+            return "未知"
+        seconds = max(0, int((time.time() * 1000 - ts) / 1000))
+        if seconds < 60:
+            return f"{seconds}秒前"
+        if seconds < 3600:
+            return f"{seconds // 60}分钟前"
+        if seconds < 86400:
+            return f"{seconds // 3600}小时前"
+        return f"{seconds // 86400}天前"
 
     def _resolve_workspace(
         self, items: List[Dict[str, Any]], path: str
@@ -455,6 +471,61 @@ class DshHarnessPlugin(star.Star):
                     yield event.make_result().message(f"❌ 切换模型失败：{e}（偏好已保存，新建会话时生效）")
                 return
             yield event.make_result().message(f"✅ 已保存模型选择：{provider}/{model}，下一条消息新建会话时生效。")
+            return
+
+        if body in SESSION_WORDS or body.startswith(("会话 ", "sessions ", "session ")):
+            event.stop_event()
+            parts = body.split(None, 1)
+            arg = parts[1].strip() if len(parts) > 1 else ""
+            try:
+                client = self._new_client()
+                data = await client.sessions()
+            except DshBridgeError as e:
+                yield event.make_result().message(f"❌ 读取会话列表失败：{e}")
+                return
+            items = data.get("items") or []
+            if not arg:
+                if not items:
+                    yield event.make_result().message("DSH 里还没有可继续的会话，先发一条 dsh <内容> 创建。")
+                    return
+                lines = ["🕘 DSH 会话（编号 | 标题 | 工作区 | 时间 | 状态）："]
+                for idx, it in enumerate(items[:15]):
+                    title = str(it.get("title") or "（无标题）")[:30]
+                    cwd = str(it.get("cwd") or "?")
+                    state_label = "运行中" if it.get("running") else ("空" if it.get("blank") else "空闲")
+                    lines.append(
+                        f"{idx + 1}. {title} — {cwd} — {self._relative_time(it.get('updatedAt'))} [{state_label}]"
+                    )
+                if len(items) > 15:
+                    lines.append(f"…共 {len(items)} 个，仅显示前 15 个")
+                current = self._sessions.get(sender)
+                if current:
+                    lines.append(f"当前绑定：{current}")
+                lines.append("继续：dsh 会话 <编号>")
+                yield event.make_result().message("\n".join(lines))
+                return
+            if not arg.isdigit() or not (1 <= int(arg) <= len(items)):
+                yield event.make_result().message(f"编号超出范围（1-{len(items)}），用「dsh 会话」查看列表。")
+                return
+            item = items[int(arg) - 1]
+            try:
+                bound = await client.bind(self._client_id(event), str(item.get("sessionId") or ""))
+            except DshBridgeError as e:
+                yield event.make_result().message(f"❌ 切换会话失败：{e}")
+                return
+            self._sessions[sender] = str(bound.get("sessionId") or "")
+            if bound.get("cwd"):
+                prefs = self._prefs.setdefault(sender, {})
+                prefs["workspacePath"] = str(bound.get("cwd"))
+                self._save_prefs()
+            busy_hint = ""
+            if self._is_busy(sender):
+                busy_hint = "（当前任务仍按旧会话跑完）"
+            title = str(bound.get("title") or item.get("title") or "（无标题）")
+            cwd = str(bound.get("cwd") or item.get("cwd") or "?")
+            yield event.make_result().message(
+                f"✅ 已切换会话：{title}（{cwd}），下一条 dsh 消息继续该对话。{busy_hint}"
+            )
             return
 
         if body in STATUS_WORDS:

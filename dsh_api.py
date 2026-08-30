@@ -91,6 +91,18 @@ class DshBridgeClient:
             "POST", "/api/bot/cancel", {"sessionId": session_id}
         )
 
+    async def sessions(self) -> Dict[str, Any]:
+        """GET /api/bot/sessions 列出 DSH 会话（供选择历史会话）。"""
+        return await self._request_json("GET", "/api/bot/sessions")
+
+    async def bind(self, client_id: str, session_id: str) -> Dict[str, Any]:
+        """POST /api/bot/bind 把 clientId 绑定到指定历史会话。"""
+        return await self._request_json(
+            "POST",
+            "/api/bot/bind",
+            {"clientId": client_id, "sessionId": session_id},
+        )
+
     async def workspaces(self) -> Dict[str, Any]:
         """GET /api/bot/workspaces 列出 DSH 工作区。"""
         return await self._request_json("GET", "/api/bot/workspaces")
