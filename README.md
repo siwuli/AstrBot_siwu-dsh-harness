@@ -19,6 +19,7 @@
 
 3. 网络拓扑：
    - 默认（推荐）：DSH 与 AstrBot 同机 → dsh_base_url 填 http://127.0.0.1:3080，零额外配置；
+   - 已有反向代理（Caddy/Nginx）：DSH 已通过反代暴露域名时直接填该地址（如 https://dsh.example.com），bridge 自带令牌认证；
    - 跨机：部分 DSH 版本 CLI 禁止 0.0.0.0 绑定，推荐在 DSH 所在机器用 SSH 反向隧道
      （ssh -N -R 13080:127.0.0.1:3080 <机器人机器>），AstrBot 填 http://127.0.0.1:13080；
      或在机器人同机部署一套 DSH。
