@@ -133,6 +133,49 @@ class DshHarnessPlugin(star.Star):
             return sub[0]
         return None
 
+    @staticmethod
+    def _is_absolute_path(path: str) -> bool:
+        """Windows 盘符/UNC 或 POSIX 绝对路径。"""
+        p = (path or "").strip()
+        return bool(
+            re.match(r"^[A-Za-z]:[\\/]", p)
+            or p.startswith(("\\\\", "//"))
+            or p.startswith("/")
+        )
+
+    async def _fetch_workspaces(self) -> List[Dict[str, Any]]:
+        """带 5 分钟缓存的工作区列表。"""
+        now = time.monotonic()
+        cached = getattr(self, "_ws_cache", None)
+        if cached and now - cached.get("ts", 0) < 300:
+            return cached.get("items") or []
+        data = await self._new_client().workspaces()
+        items = data.get("items") or []
+        self._ws_cache = {"ts": now, "items": items}
+        return items
+
+    def _resolve_workspace(
+        self, items: List[Dict[str, Any]], path: str
+    ) -> Optional[str]:
+        r"""把用户输入解析成绝对工作区路径。
+
+        绝对路径直接返回; 相对路径按"路径尾部/basename"在工作区列表里
+        唯一匹配 (如 dsh-astrbot → D:\work\dsh-astrbot), 匹配不到返回 None。
+        """
+        p = (path or "").strip()
+        if not p:
+            return None
+        if self._is_absolute_path(p):
+            return p
+        key = p.replace("\\", "/").rstrip("/").lower()
+        matches = [
+            str(it.get("path") or "")
+            for it in items
+            if str(it.get("path") or "").replace("\\", "/").rstrip("/").lower() == key
+            or str(it.get("path") or "").replace("\\", "/").rstrip("/").lower().endswith("/" + key)
+        ]
+        return matches[0] if len(matches) == 1 else None
+
     def _save_prefs(self) -> None:
         try:
             os.makedirs(os.path.dirname(PREF_FILE), exist_ok=True)
@@ -299,9 +342,12 @@ class DshHarnessPlugin(star.Star):
             if arg.isdigit() and 1 <= int(arg) <= len(items):
                 path = str(items[int(arg) - 1].get("path") or "")
             else:
-                path = arg
+                path = self._resolve_workspace(items, arg) or ""
             if not path:
-                yield event.make_result().message("未找到该工作区，用「dsh 工作区」查看列表。")
+                yield event.make_result().message(
+                    "工作区路径必须是绝对路径（如 D:\\work\\dsh-astrbot），"
+                    "或用「dsh 工作区」列表里的编号；相对路径只在能唯一匹配到某个工作区时接受。"
+                )
                 return
             self._prefs.setdefault(sender, {})["workspacePath"] = path
             self._save_prefs()
@@ -510,6 +556,18 @@ class DshHarnessPlugin(star.Star):
 
         prefs = self._prefs.get(sender, {})
         workspace_path = (prefs.get("workspacePath") or "").strip() or str(self._cfg("workspace_path", "") or "").strip()
+        if workspace_path and not self._is_absolute_path(workspace_path):
+            try:
+                resolved_ws = self._resolve_workspace(await self._fetch_workspaces(), workspace_path)
+                if resolved_ws:
+                    workspace_path = resolved_ws
+                else:
+                    logger.warning(
+                        f"workspace_path 不是绝对路径且无法匹配到工作区, 本次不发送: {workspace_path!r}"
+                    )
+                    workspace_path = ""
+            except DshBridgeError:
+                workspace_path = ""
         provider = (prefs.get("modelProvider") or "").strip() or str(self._cfg("model_provider", "") or "").strip()
         model = (prefs.get("modelName") or "").strip() or str(self._cfg("model_name", "") or "").strip()
         effort = (prefs.get("reasoningEffort") or "").strip() or str(self._cfg("reasoning_effort", "") or "").strip()
