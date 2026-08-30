@@ -42,7 +42,7 @@ HELP_TEXT = """DSH 远程操作（白名单用户，私聊）：
 · dsh <内容> — 交给 DeepSeek Harness 执行，返回非思考输出
 · dsh 工作区 — 列出工作区；dsh 工作区 <编号|路径> 切换（新建会话）
 · dsh 模型 — 列出模型（全局编号）；dsh 模型 <编号> 或 dsh 模型 <provider> <model> 切换
-· dsh 会话 — 列出历史会话；dsh 会话 <编号> 切换继续对话
+· dsh 会话 — 先选工作区；dsh 会话 <工作区编号> 看会话；dsh 会话 <工作区编号> <会话编号> 继续
 · dsh 新会话 / 状态 / 历史 / 停止 / 帮助
 · DSH 提问时：dsh <答案>；请求授权时：dsh 同意 / dsh 拒绝"""
 
@@ -494,41 +494,86 @@ class DshHarnessPlugin(star.Star):
 
         if body in SESSION_WORDS or body.startswith(("会话 ", "sessions ", "session ")):
             event.stop_event()
-            parts = body.split(None, 1)
-            arg = parts[1].strip() if len(parts) > 1 else ""
+            parts = body.split()
             try:
                 client = self._new_client()
-                ws_filter = await self._current_workspace(sender)
-                data = await client.sessions(workspace_path=ws_filter or None)
+                all_sessions = (await client.sessions()).get("items") or []
+                all_workspaces = (await client.workspaces()).get("items") or []
             except DshBridgeError as e:
                 yield event.make_result().message(f"❌ 读取会话列表失败：{e}")
                 return
-            items = data.get("items") or []
-            if not arg:
-                if not items:
+
+            # 按工作区分组; 未挂载到任何工作区的会话单列一组
+            def norm(p: Any) -> str:
+                return str(p or "").replace("\\", "/").rstrip("/").lower()
+
+            groups: List[Dict[str, Any]] = []
+            used: set = set()
+            for ws in all_workspaces:
+                path = str(ws.get("path") or "")
+                sessions = [s for s in all_sessions if norm(s.get("cwd")) == norm(path)]
+                if sessions:
+                    for s in sessions:
+                        used.add(id(s))
+                    groups.append({
+                        "label": f"{ws.get('title') or '未命名'} — {path}",
+                        "path": path,
+                        "sessions": sessions,
+                    })
+            orphan = [s for s in all_sessions if id(s) not in used]
+            if orphan:
+                groups.append({"label": "未挂载工作区的会话", "path": "", "sessions": orphan})
+
+            current_ws = norm(await self._current_workspace(sender))
+
+            if len(parts) == 1:
+                if not groups:
                     yield event.make_result().message("DSH 里还没有可继续的会话，先发一条 dsh <内容> 创建。")
                     return
-                lines = [
-                    f"🕘 DSH 会话（当前工作区：{ws_filter or '全部'}）——编号 | 标题 | 时间 | 状态："
-                ]
-                for idx, it in enumerate(items[:15]):
-                    title = str(it.get("title") or "（无标题）")[:30]
-                    state_label = "运行中" if it.get("running") else ("空" if it.get("blank") else "空闲")
+                lines = ["🗂 选择工作区查看会话："]
+                for idx, g in enumerate(groups):
+                    mark = " ★当前" if g["path"] and norm(g["path"]) == current_ws else ""
                     lines.append(
-                        f"{idx + 1}. {title} — {self._relative_time(it.get('updatedAt'))} [{state_label}]"
+                        f"{idx + 1}. {g['label']} — {len(g['sessions'])} 个会话{mark}"
                     )
-                if len(items) > 15:
-                    lines.append(f"…共 {len(items)} 个，仅显示前 15 个")
-                current = self._sessions.get(sender)
-                if current:
-                    lines.append(f"当前绑定：{current}")
-                lines.append("继续：dsh 会话 <编号>")
+                lines.append("用法：dsh 会话 <工作区编号> 查看；dsh 会话 <工作区编号> <会话编号> 直接继续")
                 yield event.make_result().message("\n".join(lines))
                 return
-            if not arg.isdigit() or not (1 <= int(arg) <= len(items)):
-                yield event.make_result().message(f"编号超出范围（1-{len(items)}），用「dsh 会话」查看列表。")
+
+            if not parts[1].isdigit():
+                yield event.make_result().message("用法：dsh 会话 <工作区编号>，或 dsh 会话 <工作区编号> <会话编号>")
                 return
-            item = items[int(arg) - 1]
+            gidx = int(parts[1]) - 1
+            if not (0 <= gidx < len(groups)):
+                yield event.make_result().message(f"工作区编号超出范围（1-{len(groups)}），用「dsh 会话」查看。")
+                return
+            group = groups[gidx]
+            sessions = group["sessions"]
+
+            if len(parts) == 2:
+                if not sessions:
+                    yield event.make_result().message("该工作区下没有会话。")
+                    return
+                lines = [f"🕘 DSH 会话（{group['label']}）："]
+                for idx, it in enumerate(sessions[:15]):
+                    title = str(it.get("title") or "（无标题）")[:30]
+                    state_label = "运行中" if it.get("running") else ("空" if it.get("blank") else "空闲")
+                    extra = ""
+                    if not group["path"]:
+                        extra = f" — {it.get('cwd') or '?'}"
+                    lines.append(
+                        f"{idx + 1}. {title}{extra} — {self._relative_time(it.get('updatedAt'))} [{state_label}]"
+                    )
+                if len(sessions) > 15:
+                    lines.append(f"…共 {len(sessions)} 个，仅显示前 15 个")
+                lines.append(f"继续：dsh 会话 {gidx + 1} <会话编号>")
+                yield event.make_result().message("\n".join(lines))
+                return
+
+            if not parts[2].isdigit() or not (1 <= int(parts[2]) <= len(sessions)):
+                yield event.make_result().message(f"会话编号超出范围（1-{len(sessions)}），用「dsh 会话 {gidx + 1}」查看。")
+                return
+            item = sessions[int(parts[2]) - 1]
             try:
                 bound = await client.bind(self._client_id(event), str(item.get("sessionId") or ""))
             except DshBridgeError as e:
