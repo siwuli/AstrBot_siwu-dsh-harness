@@ -1,0 +1,74 @@
+{
+  "dsh_enabled": {
+    "description": "启用 DSH 远程功能",
+    "hint": "关闭后，dsh 系列命令不再响应",
+    "type": "bool",
+    "default": true
+  },
+  "dsh_base_url": {
+    "description": "DSH 桥接地址 (dsh-bot-bridge)",
+    "hint": "DSH Web 服务地址，如 http://127.0.0.1:3080（同机）或 http://192.168.1.x:3080（局域网，需 dsh web --host 0.0.0.0），不要带末尾斜杠",
+    "type": "string",
+    "default": "http://127.0.0.1:3080"
+  },
+  "dsh_bot_token": {
+    "description": "DSH 桥接令牌",
+    "hint": "必须与 dsh-bot-bridge 插件配置里的 botToken 一致（profile cordis.patch.yml）",
+    "type": "string",
+    "default": ""
+  },
+  "allowed_user_ids": {
+    "description": "允许使用 DSH 远程的用户 ID 白名单",
+    "hint": "平台用户 ID（如 QQ 号），每行一个。留空则所有用户都被拒绝",
+    "type": "list",
+    "default": []
+  },
+  "allow_group_chat": {
+    "description": "允许在群聊中使用",
+    "hint": "默认仅私聊可用；开启后群聊中白名单用户也可使用（慎开，输出会发到群里）",
+    "type": "bool",
+    "default": false
+  },
+  "stream_flush_interval": {
+    "description": "输出刷新间隔（秒）",
+    "hint": "流式输出攒批发送的间隔，越小越“实时”，QQ 消息也越多",
+    "type": "float",
+    "default": 0.8
+  },
+  "stream_flush_chars": {
+    "description": "输出刷新字符数",
+    "hint": "缓冲区达到该长度立即发送（不等待刷新间隔）",
+    "type": "int",
+    "default": 800
+  },
+  "max_message_len": {
+    "description": "单条 QQ 消息最大长度",
+    "hint": "超过该长度按换行切分成多条发送",
+    "type": "int",
+    "default": 3000
+  },
+  "show_tool_calls": {
+    "description": "显示工具调用动态",
+    "hint": "harness 调用工具时向 QQ 推送一行提示（如 🔧 ls -la）",
+    "type": "bool",
+    "default": true
+  },
+  "show_tool_results": {
+    "description": "显示工具完成动态",
+    "hint": "工具执行完成时再推送一行（默认关闭以减少刷屏）",
+    "type": "bool",
+    "default": false
+  },
+  "history_limit": {
+    "description": "历史输出条数",
+    "hint": "dsh 历史 命令返回的最近条目数上限",
+    "type": "int",
+    "default": 20
+  },
+  "http_timeout": {
+    "description": "HTTP 连接超时（秒）",
+    "hint": "单次到 dsh-bot-bridge 的建连/普通请求超时；SSE 流不限制总时长",
+    "type": "int",
+    "default": 30
+  }
+}
