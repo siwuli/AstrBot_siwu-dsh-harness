@@ -156,6 +156,25 @@ class DshHarnessPlugin(star.Star):
         self._ws_cache = {"ts": now, "items": items}
         return items
 
+    async def _current_workspace(self, sender: str) -> str:
+        """当前生效的工作区路径 (偏好 > 面板配置), 相对路径自动解析, 失败返回空串。"""
+        prefs = self._prefs.get(sender, {})
+        raw = (prefs.get("workspacePath") or "").strip() or str(
+            self._cfg("workspace_path", "") or ""
+        ).strip()
+        if not raw:
+            return ""
+        if self._is_absolute_path(raw):
+            return raw
+        try:
+            resolved = self._resolve_workspace(await self._fetch_workspaces(), raw)
+        except DshBridgeError:
+            resolved = None
+        if resolved:
+            return resolved
+        logger.warning(f"workspace_path 不是绝对路径且无法匹配工作区: {raw!r}")
+        return ""
+
     @staticmethod
     def _relative_time(ts: Optional[float]) -> str:
         """毫秒时间戳 → 人类可读相对时间。"""
@@ -479,7 +498,8 @@ class DshHarnessPlugin(star.Star):
             arg = parts[1].strip() if len(parts) > 1 else ""
             try:
                 client = self._new_client()
-                data = await client.sessions()
+                ws_filter = await self._current_workspace(sender)
+                data = await client.sessions(workspace_path=ws_filter or None)
             except DshBridgeError as e:
                 yield event.make_result().message(f"❌ 读取会话列表失败：{e}")
                 return
@@ -488,13 +508,14 @@ class DshHarnessPlugin(star.Star):
                 if not items:
                     yield event.make_result().message("DSH 里还没有可继续的会话，先发一条 dsh <内容> 创建。")
                     return
-                lines = ["🕘 DSH 会话（编号 | 标题 | 工作区 | 时间 | 状态）："]
+                lines = [
+                    f"🕘 DSH 会话（当前工作区：{ws_filter or '全部'}）——编号 | 标题 | 时间 | 状态："
+                ]
                 for idx, it in enumerate(items[:15]):
                     title = str(it.get("title") or "（无标题）")[:30]
-                    cwd = str(it.get("cwd") or "?")
                     state_label = "运行中" if it.get("running") else ("空" if it.get("blank") else "空闲")
                     lines.append(
-                        f"{idx + 1}. {title} — {cwd} — {self._relative_time(it.get('updatedAt'))} [{state_label}]"
+                        f"{idx + 1}. {title} — {self._relative_time(it.get('updatedAt'))} [{state_label}]"
                     )
                 if len(items) > 15:
                     lines.append(f"…共 {len(items)} 个，仅显示前 15 个")
@@ -626,19 +647,7 @@ class DshHarnessPlugin(star.Star):
             await self._send_text(event, chunk)
 
         prefs = self._prefs.get(sender, {})
-        workspace_path = (prefs.get("workspacePath") or "").strip() or str(self._cfg("workspace_path", "") or "").strip()
-        if workspace_path and not self._is_absolute_path(workspace_path):
-            try:
-                resolved_ws = self._resolve_workspace(await self._fetch_workspaces(), workspace_path)
-                if resolved_ws:
-                    workspace_path = resolved_ws
-                else:
-                    logger.warning(
-                        f"workspace_path 不是绝对路径且无法匹配到工作区, 本次不发送: {workspace_path!r}"
-                    )
-                    workspace_path = ""
-            except DshBridgeError:
-                workspace_path = ""
+        workspace_path = await self._current_workspace(sender)
         provider = (prefs.get("modelProvider") or "").strip() or str(self._cfg("model_provider", "") or "").strip()
         model = (prefs.get("modelName") or "").strip() or str(self._cfg("model_name", "") or "").strip()
         effort = (prefs.get("reasoningEffort") or "").strip() or str(self._cfg("reasoning_effort", "") or "").strip()

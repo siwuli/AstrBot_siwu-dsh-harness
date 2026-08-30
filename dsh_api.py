@@ -12,6 +12,7 @@
 import json
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
+from urllib.parse import quote
 
 import aiohttp
 
@@ -91,9 +92,12 @@ class DshBridgeClient:
             "POST", "/api/bot/cancel", {"sessionId": session_id}
         )
 
-    async def sessions(self) -> Dict[str, Any]:
-        """GET /api/bot/sessions 列出 DSH 会话（供选择历史会话）。"""
-        return await self._request_json("GET", "/api/bot/sessions")
+    async def sessions(self, workspace_path: Optional[str] = None) -> Dict[str, Any]:
+        """GET /api/bot/sessions 列出 DSH 会话（可选按工作区过滤）。"""
+        path = "/api/bot/sessions"
+        if workspace_path:
+            path += "?workspacePath=" + quote(str(workspace_path), safe="")
+        return await self._request_json("GET", path)
 
     async def bind(self, client_id: str, session_id: str) -> Dict[str, Any]:
         """POST /api/bot/bind 把 clientId 绑定到指定历史会话。"""
