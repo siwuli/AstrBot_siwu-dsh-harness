@@ -3,7 +3,7 @@
 指定**白名单用户**在**私聊**中通过机器人接入 [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness) 执行任务：
 用户消息 → 插件 → dsh-bot-bridge (DSH 宿主插件) → DSH Agent（可调用工具/子代理等）→ **非思考输出**实时流式回到 QQ。
 
-> 插件 id：dsh_harness　当前版本：1.1.0
+> 插件 id：dsh_harness　当前版本：1.2.0
 
 ## 前置条件
 
@@ -40,8 +40,9 @@
     dsh <内容>                    把内容交给 DSH 执行（首次自动创建会话）
     dsh 工作区 / workspace         列出工作区
     dsh 工作区 <编号|路径>         切换工作区（下条消息新建会话）
-    dsh 模型 / model              列出模型目录
-    dsh 模型 <provider> <model>   切换模型（有会话立即生效，无会话则新建时生效）
+    dsh 模型 / model              列出模型目录（全局编号，重名不怕）
+    dsh 模型 <编号>               按编号切换（有会话立即生效，无会话则新建时生效）
+    dsh 模型 <provider> <model>   按名称切换（支持缩写/子串唯一匹配，歧义会列出候选）
     dsh 新会话 / reset            解绑会话，下条消息自动新建
     dsh 状态 / status             查看会话与执行状态
     dsh 历史 / history            查看最近输出（默认排除思考）
@@ -100,6 +101,7 @@
 
 | 版本 | 更新内容 |
 | --- | --- |
+| 1.2.0 | 模型选择重做：全局编号选择（dsh 模型 <编号>）+ provider/model 模糊解析（缩写/子串唯一匹配，跨提供商重名列出候选），面板配置的模型字符串同样自动解析 |
 | 1.1.0 | 流式输出改为攒批（≥300 字或 ≥3 秒，结束一次性补齐，不再逐词发送）；新增工作区选择（dsh 工作区）与模型切换（dsh 模型）；面板新增 workspace_path / model_provider / model_name / reasoning_effort 配置 |
 | 1.0.0 | 初版：白名单/私聊权限、SSE 非思考输出流式转发、多轮会话、提问/授权应答、排队、历史/状态/停止/新会话命令 |
 

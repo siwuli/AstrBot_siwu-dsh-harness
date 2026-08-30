@@ -41,7 +41,7 @@ logger = logging.getLogger("astrbot")
 HELP_TEXT = """DSH 远程操作（白名单用户，私聊）：
 · dsh <内容> — 交给 DeepSeek Harness 执行，返回非思考输出
 · dsh 工作区 — 列出工作区；dsh 工作区 <编号|路径> 切换（新建会话）
-· dsh 模型 — 列出模型；dsh 模型 <provider> <model> 切换
+· dsh 模型 — 列出模型（全局编号）；dsh 模型 <编号> 或 dsh 模型 <provider> <model> 切换
 · dsh 新会话 / 状态 / 历史 / 停止 / 帮助
 · DSH 提问时：dsh <答案>；请求授权时：dsh 同意 / dsh 拒绝"""
 
@@ -76,6 +76,62 @@ class DshHarnessPlugin(star.Star):
                     self._prefs = {k: v for k, v in loaded.items() if isinstance(v, dict)}
         except (OSError, ValueError):
             self._prefs = {}
+
+    def _model_pairs(self, data: Dict[str, Any]) -> List[Dict[str, str]]:
+        """把模型目录展平成 (provider, model) 列表, 供编号/解析使用。"""
+        pairs: List[Dict[str, str]] = []
+        for g in data.get("groups") or []:
+            provider = str(g.get("provider") or "")
+            for m in g.get("models") or []:
+                pairs.append({
+                    "provider": provider,
+                    "providerName": str(g.get("name") or provider),
+                    "model": str(m.get("id") or ""),
+                    "modelName": str(m.get("name") or ""),
+                })
+        return pairs
+
+    async def _fetch_model_catalog(self) -> List[Dict[str, str]]:
+        """带 5 分钟缓存的模型目录 (展平列表)。"""
+        now = time.monotonic()
+        cached = getattr(self, "_model_cache", None)
+        if cached and now - cached.get("ts", 0) < 300:
+            return cached.get("pairs") or []
+        data = await self._new_client().models()
+        pairs = self._model_pairs(data)
+        self._model_cache = {"ts": now, "pairs": pairs}
+        return pairs
+
+    def _resolve_model(
+        self, pairs: List[Dict[str, str]], provider: str, model: str
+    ) -> Optional[Dict[str, str]]:
+        """把用户输入的 provider/model 解析成唯一 (provider, model)。
+
+        规则: provider 先精确匹配 id, 再唯一子串匹配; model 先精确匹配,
+        再唯一子串匹配。跨提供商重名或匹配不到时返回 None。
+        """
+        provider = (provider or "").strip().lower()
+        model = (model or "").strip().lower()
+        if not provider or not model:
+            return None
+        providers = {p["provider"].lower() for p in pairs}
+        resolved_provider = None
+        if provider in providers:
+            resolved_provider = provider
+        else:
+            cands = [p for p in providers if provider in p]
+            if len(cands) == 1:
+                resolved_provider = cands[0]
+            else:
+                return None
+        in_provider = [p for p in pairs if p["provider"].lower() == resolved_provider]
+        exact = [p for p in in_provider if p["model"].lower() == model]
+        if len(exact) == 1:
+            return exact[0]
+        sub = [p for p in in_provider if model in p["model"].lower()]
+        if len(sub) == 1:
+            return sub[0]
+        return None
 
     def _save_prefs(self) -> None:
         try:
@@ -260,36 +316,79 @@ class DshHarnessPlugin(star.Star):
         if body in MODEL_WORDS or body.startswith(("模型 ", "model ")):
             event.stop_event()
             parts = body.split()
+            try:
+                pairs = await self._fetch_model_catalog()
+            except DshBridgeError as e:
+                yield event.make_result().message(f"❌ 读取模型目录失败：{e}")
+                return
             if len(parts) == 1:
-                try:
-                    data = await self._new_client().models()
-                except DshBridgeError as e:
-                    yield event.make_result().message(f"❌ 读取模型目录失败：{e}")
-                    return
-                groups = data.get("groups") or []
-                if not groups:
+                if not pairs:
                     yield event.make_result().message("DSH 模型目录为空。")
                     return
-                lines = ["🧠 DSH 模型目录："]
-                for g in groups:
-                    ids = [str(m.get("id") or "") for m in (g.get("models") or [])][:12]
-                    label = g.get("name") or g.get("provider") or "?"
-                    lines.append(f"· {label}（{g.get('provider')}）：{' / '.join(ids)}")
-                failures = data.get("failures") or []
-                if failures:
-                    lines.append("· 加载失败: " + ", ".join(str(x.get("id") or "?") for x in failures))
+                lines = ["🧠 DSH 模型目录（全局编号，重名也不怕）："]
+                for idx, p in enumerate(pairs[:50]):
+                    lines.append(f"{idx + 1}. {p['provider']} / {p['model']}（{p['modelName']}）")
+                if len(pairs) > 50:
+                    lines.append(f"…共 {len(pairs)} 个，仅显示前 50 个")
                 pref = self._prefs.get(sender, {})
                 if pref.get("modelProvider") and pref.get("modelName"):
                     lines.append(f"当前偏好：{pref.get('modelProvider')}/{pref.get('modelName')}")
-                lines.append("切换：dsh 模型 <provider> <model> [思考强度]")
+                lines.append("切换：dsh 模型 <编号>；或 dsh 模型 <provider> <model> [思考强度]")
                 yield event.make_result().message("\n".join(lines))
                 return
-            provider = parts[1] if len(parts) > 1 else ""
-            model = parts[2] if len(parts) > 2 else ""
-            effort = parts[3] if len(parts) > 3 else ""
-            if not provider or not model:
-                yield event.make_result().message("用法：dsh 模型 <provider> <model>，如 dsh 模型 deepseek deepseek-chat")
-                return
+
+            arg1 = parts[1].strip()
+            effort = parts[2].strip() if len(parts) > 2 else ""
+            provider = ""
+            model = ""
+
+            if arg1.isdigit():
+                # 全局编号 → 唯一 (provider, model)
+                index = int(arg1) - 1
+                if 0 <= index < len(pairs):
+                    provider = pairs[index]["provider"]
+                    model = pairs[index]["model"]
+                else:
+                    yield event.make_result().message(f"编号超出范围（1-{len(pairs)}），用「dsh 模型」查看。")
+                    return
+            elif len(parts) >= 3:
+                provider_arg, model_arg = arg1, parts[2].strip()
+                resolved = self._resolve_model(pairs, provider_arg, model_arg)
+                if not resolved:
+                    cands = [p for p in pairs if p["model"].lower() == model_arg.lower()]
+                    if len(cands) > 1:
+                        lines = [f"多个提供商都有模型「{model_arg}」，请用编号："]
+                        for idx, p in enumerate(pairs):
+                            if p["model"].lower() == model_arg.lower():
+                                lines.append(f"{idx + 1}. {p['provider']} / {p['model']}（{p['modelName']}）")
+                        yield event.make_result().message("\n".join(lines))
+                    else:
+                        yield event.make_result().message(
+                            f"没有解析到模型「{provider_arg} / {model_arg}」。用「dsh 模型」查看编号后输入 dsh 模型 <编号>。"
+                        )
+                    return
+                provider, model = resolved["provider"], resolved["model"]
+            else:
+                # 只给了一个模型名: 全目录唯一匹配 (先精确, 再子串)
+                exact = [p for p in pairs if p["model"].lower() == arg1.lower()]
+                if len(exact) == 1:
+                    provider, model = exact[0]["provider"], exact[0]["model"]
+                else:
+                    sub = [p for p in pairs if arg1.lower() in p["model"].lower()]
+                    if len(sub) == 1:
+                        provider, model = sub[0]["provider"], sub[0]["model"]
+                    else:
+                        cands = exact if exact else sub
+                        if len(cands) > 1:
+                            lines = [f"「{arg1}」匹配到多个模型，请用编号："]
+                            for idx, p in enumerate(pairs):
+                                if p in cands:
+                                    lines.append(f"{idx + 1}. {p['provider']} / {p['model']}（{p['modelName']}）")
+                            yield event.make_result().message("\n".join(lines))
+                        else:
+                            yield event.make_result().message(f"没有找到模型「{arg1}」。用「dsh 模型」查看编号。")
+                        return
+
             prefs = self._prefs.setdefault(sender, {})
             prefs["modelProvider"] = provider
             prefs["modelName"] = model
@@ -414,6 +513,16 @@ class DshHarnessPlugin(star.Star):
         provider = (prefs.get("modelProvider") or "").strip() or str(self._cfg("model_provider", "") or "").strip()
         model = (prefs.get("modelName") or "").strip() or str(self._cfg("model_name", "") or "").strip()
         effort = (prefs.get("reasoningEffort") or "").strip() or str(self._cfg("reasoning_effort", "") or "").strip()
+        # 面板/偏好里的模型字符串同样做目录解析 (提供商缩写、大小写、重名都安全)
+        if provider and model:
+            try:
+                resolved = self._resolve_model(await self._fetch_model_catalog(), provider, model)
+                if resolved:
+                    provider, model = resolved["provider"], resolved["model"]
+                else:
+                    logger.warning(f"模型配置无法解析: {provider}/{model}, 将原样传给 bridge")
+            except DshBridgeError:
+                pass
         try:
             async for ev in client.prompt_stream(
                 client_id=client_id,
