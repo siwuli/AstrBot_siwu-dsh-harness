@@ -7,7 +7,7 @@
   },
   "dsh_base_url": {
     "description": "DSH 桥接地址 (dsh-bot-bridge)",
-    "hint": "DSH Web 服务地址，如 http://127.0.0.1:3080（同机）或 http://192.168.1.x:3080（局域网，需 dsh web --host 0.0.0.0），不要带末尾斜杠",
+    "hint": "DSH Web 服务地址，如 http://127.0.0.1:3080（同机）或 http://127.0.0.1:13080（经 SSH 隧道），不要带末尾斜杠",
     "type": "string",
     "default": "http://127.0.0.1:3080"
   },
@@ -29,17 +29,47 @@
     "type": "bool",
     "default": false
   },
+  "workspace_path": {
+    "description": "默认工作区路径",
+    "hint": "新会话默认使用的工作目录（如 /data/workspace）。留空则用 dsh-bot-bridge/DSH 的默认值；用户可用「dsh 工作区」命令临时切换",
+    "type": "string",
+    "default": ""
+  },
+  "model_provider": {
+    "description": "默认模型 provider",
+    "hint": "新建会话时使用的模型 provider（如 deepseek）。留空则用 DSH 默认；用户可用「dsh 模型」命令切换",
+    "type": "string",
+    "default": ""
+  },
+  "model_name": {
+    "description": "默认模型名称",
+    "hint": "新建会话时使用的模型 id（如 deepseek-chat / deepseek-reasoner）。需与 model_provider 配合填写",
+    "type": "string",
+    "default": ""
+  },
+  "reasoning_effort": {
+    "description": "默认思考强度",
+    "hint": "可选，如 low/medium/high，留空使用模型默认",
+    "type": "string",
+    "default": ""
+  },
   "stream_flush_interval": {
-    "description": "输出刷新间隔（秒）",
-    "hint": "流式输出攒批发送的间隔，越小越“实时”，QQ 消息也越多",
+    "description": "输出攒批间隔（秒）",
+    "hint": "正文攒批发送的最小间隔；攒不够 stream_min_chars 不会发（避免逐词刷屏），攒够 stream_flush_chars 立即发",
     "type": "float",
-    "default": 0.8
+    "default": 3
   },
   "stream_flush_chars": {
-    "description": "输出刷新字符数",
-    "hint": "缓冲区达到该长度立即发送（不等待刷新间隔）",
+    "description": "输出攒批字符数",
+    "hint": "缓冲区达到该长度立即发送（不等待间隔）",
     "type": "int",
-    "default": 800
+    "default": 2000
+  },
+  "stream_min_chars": {
+    "description": "输出最小发送字符数",
+    "hint": "间隔到达时若缓冲区不足该长度则继续攒（防止一个词一条消息），结束时剩余内容会一次性发完",
+    "type": "int",
+    "default": 300
   },
   "max_message_len": {
     "description": "单条 QQ 消息最大长度",

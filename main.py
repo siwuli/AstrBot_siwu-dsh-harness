@@ -19,7 +19,9 @@
 """
 
 import asyncio
+import json
 import logging
+import os
 import re
 import time
 from collections import deque
@@ -28,23 +30,27 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 from astrbot.api import star
 from astrbot.api.all import AstrMessageEvent, MessageChain
 from astrbot.api.event import filter
+from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
 from .dsh_api import DshBridgeClient, DshBridgeError
+
+PREF_FILE = os.path.join(get_astrbot_plugin_data_path(), "dsh_harness_prefs.json")
 
 logger = logging.getLogger("astrbot")
 
 HELP_TEXT = """DSH 远程操作（白名单用户，私聊）：
-· dsh <内容> — 交给 DeepSeek Harness 执行，实时返回非思考输出
-· dsh 新会话 — 解绑当前会话，下条消息自动新建
-· dsh 状态 — 查看会话与执行状态
-· dsh 历史 — 查看最近输出
-· dsh 停止 — 打断当前任务
+· dsh <内容> — 交给 DeepSeek Harness 执行，返回非思考输出
+· dsh 工作区 — 列出工作区；dsh 工作区 <编号|路径> 切换（新建会话）
+· dsh 模型 — 列出模型；dsh 模型 <provider> <model> 切换
+· dsh 新会话 / 状态 / 历史 / 停止 / 帮助
 · DSH 提问时：dsh <答案>；请求授权时：dsh 同意 / dsh 拒绝"""
 
 RESET_WORDS = {"新会话", "重置", "reset", "new", "clear"}
 STATUS_WORDS = {"状态", "status", "s"}
 HISTORY_WORDS = {"历史", "history", "log"}
 STOP_WORDS = {"停止", "stop", "cancel"}
+WORKSPACE_WORDS = {"工作区", "workspace", "ws"}
+MODEL_WORDS = {"模型", "model"}
 HELP_WORDS = {"帮助", "help", "h", "?"}
 ALLOW_WORDS = {"同意", "允许", "批准", "确认", "可以", "yes", "y", "ok", "on"}
 
@@ -61,6 +67,23 @@ class DshHarnessPlugin(star.Star):
         self._pending: Dict[str, Dict[str, Any]] = {}
         # user_id → sessionId (本地缓存, 权威以 bridge 存储为准)
         self._sessions: Dict[str, str] = {}
+        # user_id → 用户级偏好 (workspacePath / modelProvider / modelName / reasoningEffort)
+        self._prefs: Dict[str, Dict[str, str]] = {}
+        try:
+            with open(PREF_FILE, "r", encoding="utf-8") as fp:
+                loaded = json.load(fp)
+                if isinstance(loaded, dict):
+                    self._prefs = {k: v for k, v in loaded.items() if isinstance(v, dict)}
+        except (OSError, ValueError):
+            self._prefs = {}
+
+    def _save_prefs(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(PREF_FILE), exist_ok=True)
+            with open(PREF_FILE, "w", encoding="utf-8") as fp:
+                json.dump(self._prefs, fp, ensure_ascii=False, indent=2)
+        except OSError as e:
+            logger.warning(f"保存偏好失败: {e}")
 
     # ------------------------------------------------------------------
     # 配置 / 权限 / 发送辅助
@@ -192,6 +215,103 @@ class DshHarnessPlugin(star.Star):
                 yield event.make_result().message(f"❌ 停止失败：{e}")
             return
 
+        if body in WORKSPACE_WORDS or body.startswith(("工作区 ", "workspace ", "ws ")):
+            event.stop_event()
+            try:
+                client = self._new_client()
+                data = await client.workspaces()
+            except DshBridgeError as e:
+                yield event.make_result().message(f"❌ 读取工作区失败：{e}")
+                return
+            items = data.get("items") or []
+            parts = body.split(None, 1)
+            arg = parts[1].strip() if len(parts) > 1 else ""
+            if not arg:
+                if not items:
+                    yield event.make_result().message("DSH 当前没有注册任何工作区（在 DSH 里打开/创建一个项目即可）。")
+                    return
+                lines = ["🗂 DSH 工作区："]
+                for idx, it in enumerate(items):
+                    lines.append(f"{idx + 1}. {it.get('title') or '未命名'} — {it.get('path')}")
+                pref = self._prefs.get(sender, {}).get("workspacePath")
+                if pref:
+                    lines.append(f"当前偏好：{pref}")
+                lines.append("切换：dsh 工作区 <编号|路径>（会新建会话）")
+                yield event.make_result().message("\n".join(lines))
+                return
+            path = ""
+            if arg.isdigit() and 1 <= int(arg) <= len(items):
+                path = str(items[int(arg) - 1].get("path") or "")
+            else:
+                path = arg
+            if not path:
+                yield event.make_result().message("未找到该工作区，用「dsh 工作区」查看列表。")
+                return
+            self._prefs.setdefault(sender, {})["workspacePath"] = path
+            self._save_prefs()
+            try:
+                await self._new_client().reset(self._client_id(event))
+            except DshBridgeError:
+                pass
+            self._sessions.pop(sender, None)
+            yield event.make_result().message(f"✅ 已切换工作区：{path}\n下一条 dsh 消息将在该工作区新建会话。")
+            return
+
+        if body in MODEL_WORDS or body.startswith(("模型 ", "model ")):
+            event.stop_event()
+            parts = body.split()
+            if len(parts) == 1:
+                try:
+                    data = await self._new_client().models()
+                except DshBridgeError as e:
+                    yield event.make_result().message(f"❌ 读取模型目录失败：{e}")
+                    return
+                groups = data.get("groups") or []
+                if not groups:
+                    yield event.make_result().message("DSH 模型目录为空。")
+                    return
+                lines = ["🧠 DSH 模型目录："]
+                for g in groups:
+                    ids = [str(m.get("id") or "") for m in (g.get("models") or [])][:12]
+                    label = g.get("name") or g.get("provider") or "?"
+                    lines.append(f"· {label}（{g.get('provider')}）：{' / '.join(ids)}")
+                failures = data.get("failures") or []
+                if failures:
+                    lines.append("· 加载失败: " + ", ".join(str(x.get("id") or "?") for x in failures))
+                pref = self._prefs.get(sender, {})
+                if pref.get("modelProvider") and pref.get("modelName"):
+                    lines.append(f"当前偏好：{pref.get('modelProvider')}/{pref.get('modelName')}")
+                lines.append("切换：dsh 模型 <provider> <model> [思考强度]")
+                yield event.make_result().message("\n".join(lines))
+                return
+            provider = parts[1] if len(parts) > 1 else ""
+            model = parts[2] if len(parts) > 2 else ""
+            effort = parts[3] if len(parts) > 3 else ""
+            if not provider or not model:
+                yield event.make_result().message("用法：dsh 模型 <provider> <model>，如 dsh 模型 deepseek deepseek-chat")
+                return
+            prefs = self._prefs.setdefault(sender, {})
+            prefs["modelProvider"] = provider
+            prefs["modelName"] = model
+            if effort:
+                prefs["reasoningEffort"] = effort
+            self._save_prefs()
+            session_id = self._sessions.get(sender)
+            if not session_id:
+                try:
+                    session_id = await self._new_client().get_session(self._client_id(event))
+                except DshBridgeError:
+                    session_id = None
+            if session_id:
+                try:
+                    await self._new_client().select_model(session_id, provider, model, effort or None)
+                    yield event.make_result().message(f"✅ 当前会话已切换模型：{provider}/{model}" + (f"（思考强度 {effort}）" if effort else ""))
+                except DshBridgeError as e:
+                    yield event.make_result().message(f"❌ 切换模型失败：{e}（偏好已保存，新建会话时生效）")
+                return
+            yield event.make_result().message(f"✅ 已保存模型选择：{provider}/{model}，下一条消息新建会话时生效。")
+            return
+
         if body in STATUS_WORDS:
             event.stop_event()
             try:
@@ -289,16 +409,31 @@ class DshHarnessPlugin(star.Star):
             last_flush = time.monotonic()
             await self._send_text(event, chunk)
 
+        prefs = self._prefs.get(sender, {})
+        workspace_path = (prefs.get("workspacePath") or "").strip() or str(self._cfg("workspace_path", "") or "").strip()
+        provider = (prefs.get("modelProvider") or "").strip() or str(self._cfg("model_provider", "") or "").strip()
+        model = (prefs.get("modelName") or "").strip() or str(self._cfg("model_name", "") or "").strip()
+        effort = (prefs.get("reasoningEffort") or "").strip() or str(self._cfg("reasoning_effort", "") or "").strip()
         try:
-            async for ev in client.prompt_stream(client_id=client_id, text=text):
+            async for ev in client.prompt_stream(
+                client_id=client_id,
+                text=text,
+                workspace_path=workspace_path or None,
+                model_provider=provider or None,
+                model_name=model or None,
+                reasoning_effort=effort or None,
+            ):
                 etype = ev.get("type")
                 if etype == "text":
                     buffer.append(str(ev.get("text") or ""))
                     joined = "".join(buffer)
                     now = time.monotonic()
-                    if len(joined) >= int(self._cfg("stream_flush_chars", 800) or 800) or (
-                            now - last_flush
-                        ) >= float(self._cfg("stream_flush_interval", 0.8) or 0.8):
+                    flush_chars = int(self._cfg("stream_flush_chars", 2000) or 2000)
+                    min_chars = int(self._cfg("stream_min_chars", 300) or 300)
+                    interval = float(self._cfg("stream_flush_interval", 3.0) or 3.0)
+                    if len(joined) >= flush_chars or (
+                        now - last_flush >= interval and len(joined) >= min_chars
+                    ):
                         await flush()
                 elif etype == "tool":
                     await flush()

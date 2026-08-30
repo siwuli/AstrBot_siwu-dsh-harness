@@ -91,12 +91,41 @@ class DshBridgeClient:
             "POST", "/api/bot/cancel", {"sessionId": session_id}
         )
 
+    async def workspaces(self) -> Dict[str, Any]:
+        """GET /api/bot/workspaces 列出 DSH 工作区。"""
+        return await self._request_json("GET", "/api/bot/workspaces")
+
+    async def models(self) -> Dict[str, Any]:
+        """GET /api/bot/models 列出模型目录。"""
+        return await self._request_json("GET", "/api/bot/models")
+
+    async def select_model(
+        self,
+        session_id: str,
+        provider: str,
+        model: str,
+        reasoning_effort: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """POST /api/bot/model 给现有会话切换模型。"""
+        payload: Dict[str, Any] = {
+            "sessionId": session_id,
+            "provider": provider,
+            "model": model,
+        }
+        if reasoning_effort:
+            payload["reasoningEffort"] = reasoning_effort
+        return await self._request_json("POST", "/api/bot/model", payload)
+
     async def prompt_stream(
         self,
         client_id: str,
         text: str,
         session_id: Optional[str] = None,
         reset: bool = False,
+        workspace_path: Optional[str] = None,
+        model_provider: Optional[str] = None,
+        model_name: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """POST /api/bot/prompt, 逐帧产出 SSE 事件 dict。
 
@@ -105,6 +134,14 @@ class DshBridgeClient:
         payload: Dict[str, Any] = {"clientId": client_id, "text": text, "reset": reset}
         if session_id:
             payload["sessionId"] = session_id
+        if workspace_path:
+            payload["workspacePath"] = workspace_path
+        if model_provider:
+            payload["modelProvider"] = model_provider
+        if model_name:
+            payload["modelName"] = model_name
+        if reasoning_effort:
+            payload["reasoningEffort"] = reasoning_effort
 
         timeout = aiohttp.ClientTimeout(total=None, connect=self.timeout, sock_read=300.0)
         async with aiohttp.ClientSession(timeout=timeout) as session:
