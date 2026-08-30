@@ -9,7 +9,7 @@
 
 1. 一台运行 DSH Web 的机器（本机或局域网/服务器均可），并安装宿主插件 [dsh-bot-bridge](https://github.com/siwuli/dsh-bot-bridge)（npm 包同名）：
 
-    dsh plugin --profile <profile> add dsh-bot-bridge
+    dsh plugin --profile <你的profile名> add dsh-bot-bridge
 
 2. 在 DSH profile 的 cordis.patch.yml 里配置 botToken（与下方插件配置一致）：
 
@@ -17,7 +17,11 @@
       config:
         botToken: '一个随机长令牌'
 
-3. 若 DSH 与 AstrBot 不在同一台机器：DSH 需以 dsh web --host 0.0.0.0 启动（或经隧道暴露），并在本插件 dsh_base_url 里填局域网/公网地址。
+3. 网络拓扑：
+   - 默认（推荐）：DSH 与 AstrBot 同机 → dsh_base_url 填 http://127.0.0.1:3080，零额外配置；
+   - 跨机：部分 DSH 版本 CLI 禁止 0.0.0.0 绑定，推荐在 DSH 所在机器用 SSH 反向隧道
+     （ssh -N -R 13080:127.0.0.1:3080 <机器人机器>），AstrBot 填 http://127.0.0.1:13080；
+     或在机器人同机部署一套 DSH。
 
 ## 功能
 
@@ -90,4 +94,3 @@
 ## 项目地址
 
 <https://github.com/siwuli/AstrBot_siwu-dsh-harness>
-
